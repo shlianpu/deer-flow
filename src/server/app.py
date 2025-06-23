@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 import os
+import requests
 from typing import Annotated, List, cast
 from uuid import uuid4
 
@@ -40,7 +41,6 @@ from src.server.rag_request import (
 )
 from src.server.config_request import ConfigResponse
 from src.llms.llm import get_configured_llm_models
-from src.tools import VolcengineTTS
 
 logger = logging.getLogger(__name__)
 
@@ -200,7 +200,7 @@ def _make_event(event_type: str, data: dict[str, any]):
 
 @app.post("/api/tts")
 async def text_to_speech(request: TTSRequest):
-    """Convert text to speech using volcengine TTS API."""
+    """Convert text to speech using Bytedance openspeech TTS API."""
     app_id = os.getenv("VOLCENGINE_TTS_APPID", "")
     if not app_id:
         raise HTTPException(status_code=400, detail="VOLCENGINE_TTS_APPID is not set")
@@ -211,33 +211,68 @@ async def text_to_speech(request: TTSRequest):
         )
 
     try:
+        # Configure API settings
+        tts_api_url = "https://openspeech.bytedance.com/api/v1/tts"
         cluster = os.getenv("VOLCENGINE_TTS_CLUSTER", "volcano_tts")
-        voice_type = os.getenv("VOLCENGINE_TTS_VOICE_TYPE", "BV700_V2_streaming")
-
-        tts_client = VolcengineTTS(
-            appid=app_id,
-            access_token=access_token,
-            cluster=cluster,
-            voice_type=voice_type,
-        )
-        # Call the TTS API
-        result = tts_client.text_to_speech(
-            text=request.text[:1024],
-            encoding=request.encoding,
-            speed_ratio=request.speed_ratio,
-            volume_ratio=request.volume_ratio,
-            pitch_ratio=request.pitch_ratio,
-            text_type=request.text_type,
-            with_frontend=request.with_frontend,
-            frontend_type=request.frontend_type,
-        )
-
-        if not result["success"]:
-            raise HTTPException(status_code=500, detail=str(result["error"]))
-
+        voice_type = os.getenv("VOLCENGINE_TTS_VOICE_TYPE", "zh_male_yuanboxiaoshu_moon_bigtts")
+        
+        # Prepare request headers
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer;{access_token}"
+        }
+        
+        # Prepare request payload
+        payload = {
+            "app": {
+                "appid": app_id,
+                "token": access_token,
+                "cluster": cluster
+            },
+            "user": {
+                "uid": str(uuid4())[:10]  # Generate a random user ID
+            },
+            "audio": {
+                "voice_type": voice_type,
+                "encoding": request.encoding
+            },
+            "request": {
+                "reqid": str(uuid4()),
+                "text": request.text[:1024],
+                "operation": "query"
+            }
+        }
+        
+        # Optional parameters if provided
+        if request.speed_ratio is not None:
+            payload["audio"]["speed"] = request.speed_ratio
+        if request.volume_ratio is not None:
+            payload["audio"]["volume"] = request.volume_ratio
+        if request.pitch_ratio is not None:
+            payload["audio"]["pitch"] = request.pitch_ratio
+        if request.text_type is not None:
+            payload["request"]["text_type"] = request.text_type
+        if request.with_frontend is not None:
+            payload["request"]["with_frontend"] = request.with_frontend
+        if request.frontend_type is not None:
+            payload["request"]["frontend_type"] = request.frontend_type
+            
+        # Make the API request
+        response = requests.post(tts_api_url, headers=headers, json=payload)
+        
+        # Process the response
+        if response.status_code != 200:
+            raise HTTPException(status_code=response.status_code, detail=response.text)
+            
+        response_json = response.json()
+        data_base64 = response_json.get('data')
+        
+        if not data_base64:
+            raise HTTPException(status_code=500, detail=f"No data field in response: {response_json}")
+        
         # Decode the base64 audio data
-        audio_data = base64.b64decode(result["audio_data"])
-
+        audio_data = base64.b64decode(data_base64)
+        
         # Return the audio file
         return Response(
             content=audio_data,
